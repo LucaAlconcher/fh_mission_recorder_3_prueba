@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { createLogger } from '@/utils/logger';
@@ -10,6 +10,23 @@ import { generateDJIMission } from '@/utils/wpml-generator';
 import { Mission, MissionType, Waypoint, Drone, Dock, PointGroup } from '@/utils/interfaces';
 import { useMissionActions } from '@/hooks/useMissionActions';
 import { dockFullIcon } from '@/utils/mapIcons';
+import { parseKML } from '@/utils/kmlParser';
+
+type DockSelection = number | 'custom' | null;
+
+function buildCustomDock(name: string, latitude: number, longitude: number, height: number): Dock {
+  return {
+    index: -1,
+    deviceSn: 'custom',
+    deviceModelName: 'Punto manual',
+    deviceProjectCallsign: name || 'Punto manual',
+    deviceOrganizationCallsign: '',
+    longitude,
+    latitude,
+    height,
+    droneInDock: false,
+  };
+}
 
 const log = createLogger('RouteExporter');
 
@@ -91,6 +108,15 @@ function buildZenithalMission(
     missionType: MissionType.ZENITHAL,
     waypoints,
   };
+}
+
+function DockPickerController({ active, onPick }: { active: boolean; onPick: (lat: number, lng: number) => void }) {
+  useMapEvents({
+    click: (e) => {
+      if (active) onPick(e.latlng.lat, e.latlng.lng);
+    },
+  });
+  return null;
 }
 
 function RoutesMapController({ routes, routeDocks }: { routes: Route[], routeDocks: (Dock | null)[] }) {
@@ -183,7 +209,14 @@ export function RouteExporter({
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [selectedDeviceIdx, setSelectedDeviceIdx] = useState<number | null>(null);
+  const [selectedDeviceIdx, setSelectedDeviceIdx] = useState<DockSelection>(null);
+  const [customDock, setCustomDock] = useState<Dock | null>(null);
+  const [customDockName, setCustomDockName] = useState('');
+  const [customDockLat, setCustomDockLat] = useState('');
+  const [customDockLon, setCustomDockLon] = useState('');
+  const [customDockHeight, setCustomDockHeight] = useState('0');
+  const [pickingDockOnMap, setPickingDockOnMap] = useState(false);
+  const [customDockError, setCustomDockError] = useState<string | null>(null);
   const [selectedPresetId, setSelectedPresetId] = useState(DRONE_PRESETS[0].id);
   const [flightHeight, setFlightHeight] = useState(70);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -200,13 +233,60 @@ export function RouteExporter({
   // Per-batch name prefix (only relevant when multiple batches)
   const [batchPrefixes, setBatchPrefixes] = useState<Record<number, string>>({});
   // Per-route dock override: routeId → device index (undefined = use global)
-  const [routeDockOverrides, setRouteDockOverrides] = useState<Record<string, number | null>>({});
+  const [routeDockOverrides, setRouteDockOverrides] = useState<Record<string, DockSelection>>({});
   // Loading state while routes are being computed
   const [isReady, setIsReady] = useState(false);
 
   const { uploadMission, isUploading } = useMissionActions(orgId, projectId);
 
-  const selectedDock = selectedDeviceIdx !== null ? (devices[selectedDeviceIdx]?.parent ?? null) : null;
+  const resolveDock = (selection: DockSelection): Dock | null => {
+    if (selection === 'custom') return customDock;
+    if (selection === null) return null;
+    return devices[selection]?.parent ?? null;
+  };
+
+  const selectedDock = resolveDock(selectedDeviceIdx);
+
+  const handleAddCustomDock = () => {
+    const lat = parseFloat(customDockLat);
+    const lon = parseFloat(customDockLon);
+    const height = parseFloat(customDockHeight) || 0;
+    if (isNaN(lat) || isNaN(lon)) {
+      setCustomDockError('Coordenadas inválidas');
+      return;
+    }
+    setCustomDock(buildCustomDock(customDockName, lat, lon, height));
+    setCustomDockError(null);
+    setPickingDockOnMap(false);
+  };
+
+  const handlePickDockOnMap = (lat: number, lng: number) => {
+    setCustomDockLat(String(lat));
+    setCustomDockLon(String(lng));
+    setCustomDock(buildCustomDock(customDockName, lat, lng, parseFloat(customDockHeight) || 0));
+    setCustomDockError(null);
+    setPickingDockOnMap(false);
+  };
+
+  const handleImportDockKml = async (file: File) => {
+    setCustomDockError(null);
+    try {
+      const parsed = await parseKML(file);
+      if (parsed.length === 0) {
+        setCustomDockError('No se encontró ningún punto en el archivo');
+        return;
+      }
+      const p = parsed[0];
+      setCustomDockName(p.name);
+      setCustomDockLat(String(p.latitude));
+      setCustomDockLon(String(p.longitude));
+      setCustomDockHeight(String(p.altitude ?? 0));
+      setCustomDock(buildCustomDock(p.name, p.latitude, p.longitude, p.altitude ?? 0));
+    } catch (err) {
+      setCustomDockError(err instanceof Error ? err.message : 'Error al leer el archivo KML');
+      log.error('Dock KML import error:', err);
+    }
+  };
   const [optimizationDock, setOptimizationDock] = useState<Dock | null>(null);
 
   // Returns [{batchId, routes}] — one entry per batch, sorted by batchId
@@ -379,7 +459,7 @@ export function RouteExporter({
 
   const getRouteDock = (routeId: string): Dock | null => {
     const override = routeDockOverrides[routeId];
-    if (override !== undefined) return override !== null ? (devices[override]?.parent ?? null) : null;
+    if (override !== undefined) return resolveDock(override);
     return selectedDock;
   };
 
@@ -392,8 +472,15 @@ export function RouteExporter({
       )
     );
 
+  // In single-batch mode the global routePrefix input is used; with multiple
+  // batches each has its own prefix input (batchPrefixes) instead.
+  const hasAllPrefixes = () =>
+    batchBoundaries.length <= 1
+      ? !!routePrefix.trim()
+      : batchBoundaries.every(({ batchId }) => !!(batchPrefixes[batchId] ?? '').trim());
+
   const handleDownloadKmz = async () => {
-    if (!routePrefix.trim()) { setError('Ingresá un nombre/prefijo para las rutas'); return; }
+    if (!hasAllPrefixes()) { setError('Ingresá un nombre/prefijo para las rutas'); return; }
     setIsDownloading(true);
     setError(null);
     try {
@@ -418,7 +505,7 @@ export function RouteExporter({
   };
 
   const handleUploadToFH = async () => {
-    if (!routePrefix.trim()) { setError('Ingresá un nombre/prefijo para las rutas'); return; }
+    if (!hasAllPrefixes()) { setError('Ingresá un nombre/prefijo para las rutas'); return; }
     setError(null);
     try {
       const missions = buildMissions();
@@ -494,14 +581,14 @@ export function RouteExporter({
                       {route.exceedsLimits && <span style={{ color: '#f59e0b' }}> ⚠</span>}
                     </div>
                     {/* Per-route dock selector (only when multiple docks available) */}
-                    {devices.length > 0 && (
+                    {(devices.length > 0 || customDock) && (
                       <select
                         value={routeDockOverrides[route.id] !== undefined ? (routeDockOverrides[route.id] ?? 'none') : 'global'}
                         onChange={e => {
                           const val = e.target.value;
                           setRouteDockOverrides(prev => ({
                             ...prev,
-                            [route.id]: val === 'global' ? undefined as any : val === 'none' ? null : Number(val),
+                            [route.id]: val === 'global' ? undefined as any : val === 'none' ? null : val === 'custom' ? 'custom' : Number(val),
                           }));
                         }}
                         style={{ marginTop: '3px', width: '100%', fontSize: '10px', background: '#111', color: routeDockOverrides[route.id] !== undefined ? '#60a5fa' : '#666', border: `1px solid ${routeDockOverrides[route.id] !== undefined ? '#60a5fa44' : '#222'}`, borderRadius: '3px', padding: '2px 4px' }}
@@ -514,6 +601,9 @@ export function RouteExporter({
                           const dockLabel = device.parent?.deviceOrganizationCallsign || device.parent?.deviceProjectCallsign || `Dock ${dIdx + 1}`;
                           return <option key={dIdx} value={dIdx}>{dockLabel}</option>;
                         })}
+                        {customDock && (
+                          <option value="custom">✏ {customDock.deviceProjectCallsign || 'Punto manual'}</option>
+                        )}
                       </select>
                     )}
                   </div>
@@ -607,10 +697,16 @@ export function RouteExporter({
               maxNativeZoom={17}
             />
             <RoutesMapController routes={routes} routeDocks={routes.map(r => getRouteDock(r.id))} />
+            <DockPickerController active={pickingDockOnMap} onPick={handlePickDockOnMap} />
           </MapContainer>
         </div>
 
       </div>{/* end flex row */}
+      {pickingDockOnMap && (
+        <div style={{ marginTop: '-8px', marginBottom: '8px', fontSize: '12px', color: '#f59e0b' }}>
+          📍 Hacé click en el mapa para marcar el punto de despegue manual.
+        </div>
+      )}
 
       {/* ── 3. Export config ── */}
       <div className="export-form">
@@ -721,8 +817,11 @@ export function RouteExporter({
         <div className="form-group">
           <label>Dock de despegue</label>
           <select
-            value={selectedDeviceIdx ?? ''}
-            onChange={e => setSelectedDeviceIdx(e.target.value === '' ? null : Number(e.target.value))}
+            value={selectedDeviceIdx === null ? '' : selectedDeviceIdx}
+            onChange={e => {
+              const val = e.target.value;
+              setSelectedDeviceIdx(val === '' ? null : val === 'custom' ? 'custom' : Number(val));
+            }}
             style={{ background: '#111', color: '#fff', border: '1px solid #333', borderRadius: '4px', padding: '8px 10px', fontSize: '13px' }}
           >
             <option value="">Sin dock asignado</option>
@@ -735,7 +834,72 @@ export function RouteExporter({
                 </option>
               );
             })}
+            <option value="custom">✏ Punto manual / Importar KML{customDock ? ` (${customDock.deviceProjectCallsign})` : ''}</option>
           </select>
+
+          {selectedDeviceIdx === 'custom' && (
+            <div style={{ background: '#1a1a1a', borderRadius: '6px', padding: '10px', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                <input
+                  type="text"
+                  placeholder="Nombre"
+                  value={customDockName}
+                  onChange={e => setCustomDockName(e.target.value)}
+                  style={{ flex: '1 1 120px', fontSize: '12px' }}
+                />
+                <input
+                  type="number"
+                  placeholder="Latitud"
+                  step="0.000001"
+                  value={customDockLat}
+                  onChange={e => setCustomDockLat(e.target.value)}
+                  style={{ flex: '1 1 100px', fontSize: '12px' }}
+                />
+                <input
+                  type="number"
+                  placeholder="Longitud"
+                  step="0.000001"
+                  value={customDockLon}
+                  onChange={e => setCustomDockLon(e.target.value)}
+                  style={{ flex: '1 1 100px', fontSize: '12px' }}
+                />
+                <input
+                  type="number"
+                  placeholder="Altura (m)"
+                  value={customDockHeight}
+                  onChange={e => setCustomDockHeight(e.target.value)}
+                  style={{ flex: '1 1 90px', fontSize: '12px' }}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+                <button className="btn-secondary" style={{ fontSize: '11px', padding: '4px 10px' }} onClick={handleAddCustomDock}>
+                  ✓ Usar este punto
+                </button>
+                <button
+                  className={pickingDockOnMap ? 'btn-primary' : 'btn-secondary'}
+                  style={{ fontSize: '11px', padding: '4px 10px' }}
+                  onClick={() => setPickingDockOnMap(v => !v)}
+                >
+                  {pickingDockOnMap ? '✕ Cancelar click en mapa' : '📍 Marcar en el mapa'}
+                </button>
+                <label className="btn-secondary" style={{ fontSize: '11px', padding: '4px 10px', cursor: 'pointer', margin: 0 }}>
+                  📂 Importar KML
+                  <input
+                    type="file"
+                    accept=".kml"
+                    style={{ display: 'none' }}
+                    onChange={e => {
+                      const file = e.target.files?.[0];
+                      if (file) handleImportDockKml(file);
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
+              </div>
+              {customDockError && <small style={{ color: '#f87171' }}>{customDockError}</small>}
+            </div>
+          )}
+
           {selectedDock && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
               <small style={{ color: '#888', flex: 1 }}>
@@ -773,8 +937,8 @@ export function RouteExporter({
               ⟳ Rutas optimizadas desde {optimizationDock.deviceOrganizationCallsign || optimizationDock.deviceProjectCallsign}
             </small>
           )}
-          {devices.length === 0 && (
-            <small style={{ color: '#666' }}>No hay docks en caché — abrí FlightHub para sincronizar</small>
+          {devices.length === 0 && !customDock && (
+            <small style={{ color: '#666' }}>No hay docks en caché — abrí FlightHub para sincronizar, o agregá un punto manual/KML</small>
           )}
         </div>
 
