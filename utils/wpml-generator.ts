@@ -19,6 +19,10 @@ export async function generateDJIMission(mission: Mission, options?: { heightMod
 export async function generateDJIMissionFiles(mission: Mission, options?: { heightMode?: HeightMode }) {
   const heightMode: HeightMode = options?.heightMode ?? 'relativeToStartPoint';
 
+  // waylines.wpml's executeHeightMode only supports WGS84/relativeToStartPoint
+  // (unlike template.kml's heightMode, which also allows aboveGroundLevel/EGM96).
+  const executeHeightMode = heightMode === 'EGM96' ? 'WGS84' : 'relativeToStartPoint';
+
   const activeDrone = mission.device
 
   const modelParts = (activeDrone?.deviceModelKey || '').split('-');
@@ -44,7 +48,7 @@ export async function generateDJIMissionFiles(mission: Mission, options?: { heig
     payloadPositionIndex: payloadGimbalindex,
   }
 
-  const readyWaypoints = transformWaypointsForExport(mission.waypoints, payloadGimbalindex);
+  const readyWaypoints = transformWaypointsForExport(mission.waypoints, payloadGimbalindex, activeDrone?.parent?.height ?? 0);
 
   const missionConfigXml = `
     <wpml:missionConfig>
@@ -177,7 +181,7 @@ export async function generateDJIMissionFiles(mission: Mission, options?: { heig
         <coordinates>${wp.longitude},${wp.latitude}</coordinates>
       </Point>
       <wpml:index>${index}</wpml:index>
-      <wpml:executeHeight>${wp.height}</wpml:executeHeight>
+      <wpml:executeHeight>${wp.executeHeight}</wpml:executeHeight>
       <wpml:waypointSpeed>${wp.waypointSpeed}</wpml:waypointSpeed>
       <wpml:waypointHeadingParam>
         <wpml:waypointHeadingMode>followWayline</wpml:waypointHeadingMode>
@@ -250,7 +254,7 @@ export async function generateDJIMissionFiles(mission: Mission, options?: { heig
   const waylinesFolderXml = `
     <Folder>
     <wpml:templateId>0</wpml:templateId>
-    <wpml:executeHeightMode>${heightMode}</wpml:executeHeightMode>
+    <wpml:executeHeightMode>${executeHeightMode}</wpml:executeHeightMode>
     <wpml:waylineId>0</wpml:waylineId>
     <wpml:autoFlightSpeed>10</wpml:autoFlightSpeed>
     <wpml:realTimeFollowSurfaceByFov>0</wpml:realTimeFollowSurfaceByFov>

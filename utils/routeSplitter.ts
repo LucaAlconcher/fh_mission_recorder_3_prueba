@@ -39,13 +39,19 @@ export function generateRoutes(
   let routes: Route[] = [];
   const used = new Set<string>();
   let routeIndex = 0;
+  // Punto final de la última ruta generada, usado para elegir el arranque
+  // de la siguiente ruta por cercanía en vez de por orden de array.
+  let previousRouteEndPoint: RoutePoint | null = null;
 
   while (true) {
     let currentStartPoint = startPoint;
     if (used.has(startPoint.id)) {
-      const nextAvailable = points.find(p => !used.has(p.id));
-      if (!nextAvailable) break; // No quedan más puntos por procesar
-      currentStartPoint = nextAvailable;
+      const available = points.filter(p => !used.has(p.id));
+      if (available.length === 0) break; // No quedan más puntos por procesar
+      const reference = previousRouteEndPoint ?? startPoint;
+      currentStartPoint = available.reduce((closest, p) =>
+        calculateDistance(reference, p) < calculateDistance(reference, closest) ? p : closest
+      );
     }
 
     const route: RoutePoint[] = [currentStartPoint];
@@ -87,6 +93,7 @@ export function generateRoutes(
     }
 
     if (route.length > 0) {
+      previousRouteEndPoint = currentPoint;
       routes.push(createRoute(route, routeIndex++, maxDistanceKm));
     }
 
@@ -243,23 +250,56 @@ export function splitRouteByLimits(
  * at the position that minimises added distance (best-fit edge insertion).
  */
 /**
- * Creates a route object from points
+ * Creates a route object from points, aplicando un refinamiento 2-opt
+ * para eliminar cruces/zigzags dejados por el armado greedy nearest-neighbor.
  */
 function createRoute(
   points: RoutePoint[],
   index: number,
   maxDistanceKm: number
 ): Route {
-  const totalDistanceM = calculateTotalDistance(points);
+  const optimizedPoints = twoOptImprove(points);
+  const totalDistanceM = calculateTotalDistance(optimizedPoints);
   const totalDistanceKm = totalDistanceM / 1000;
 
   return {
     id: `route-${index + 1}`,
-    points,
+    points: optimizedPoints,
     totalDistance: totalDistanceKm,
-    pointCount: points.length,
+    pointCount: optimizedPoints.length,
     exceedsLimits: totalDistanceKm > maxDistanceKm,
   };
+}
+
+/**
+ * Refinamiento 2-opt sobre un camino abierto: prueba invertir segmentos
+ * intermedios y conserva el cambio si reduce la distancia total.
+ * El primer punto queda fijo (es el punto de arranque elegido de la ruta).
+ */
+function twoOptImprove(points: RoutePoint[]): RoutePoint[] {
+  if (points.length < 4) return points;
+
+  let best = points;
+  let improved = true;
+
+  while (improved) {
+    improved = false;
+    for (let i = 1; i < best.length - 2; i++) {
+      for (let k = i + 1; k < best.length - 1; k++) {
+        const candidate = [
+          ...best.slice(0, i),
+          ...best.slice(i, k + 1).reverse(),
+          ...best.slice(k + 1),
+        ];
+        if (calculateTotalDistance(candidate) < calculateTotalDistance(best) - 1e-6) {
+          best = candidate;
+          improved = true;
+        }
+      }
+    }
+  }
+
+  return best;
 }
 
 /**

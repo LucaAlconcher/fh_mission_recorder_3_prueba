@@ -23,8 +23,15 @@ export function recalculateWaypointTurns(waypoints: Waypoint[]): Waypoint[] {
     return updated;
 }
 
-export const transformWaypointsForExport = (waypoints: Waypoint[], payloadPositionIndex: number) => {
+export const transformWaypointsForExport = (waypoints: Waypoint[], payloadPositionIndex: number, baseElevation: number = 0) => {
     return waypoints.map((wp, index) => {
+
+        // Real execution altitude only supports "relative to takeoff" (see wpml-generator.ts),
+        // which drifts from the desired AGL offset (wp.elevation) whenever the ground under this
+        // point sits higher/lower than the takeoff point. Correct for that using the point's real
+        // ground elevation when known, falling back to the takeoff elevation (flat) otherwise.
+        const groundElevation = wp.groundElevation ?? baseElevation;
+        const executeHeight = wp.elevation + (groundElevation - baseElevation);
 
         // 1. Start with the base coordinate data
         const waypoint = {
@@ -32,8 +39,13 @@ export const transformWaypointsForExport = (waypoints: Waypoint[], payloadPositi
             index: index,
             waypointSpeed: 15, // Default speed
             isRisky: false,
-            ellipsoidHeight: wp.elevation,// FIXME wp.height,
+            // ellipsoidHeight is always an absolute WGS84 height (per DJI spec), regardless of
+            // heightMode. It's the terrain-adjusted execute height on top of the takeoff elevation.
+            ellipsoidHeight: baseElevation + executeHeight,
+            // `height` (template.kml) is the flat AGL offset shown as the planned target height.
             height: wp.elevation,
+            // `executeHeight` (waylines.wpml) is what the flight controller actually flies to.
+            executeHeight,
             useStraightLine: 1,
         };
 

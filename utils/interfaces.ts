@@ -180,6 +180,9 @@ export interface Waypoint {
   latitude: number;
   elevation: number;
   height: number;
+  // Real ground elevation (absolute) at this point, when known (e.g. from imported KML/CSV Z values).
+  // Used to keep AGL height accurate over uneven terrain instead of flat relative-to-takeoff.
+  groundElevation?: number;
   yaw: number;
   pitch: number;
   zoom: number;

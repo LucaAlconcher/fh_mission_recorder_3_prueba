@@ -72,6 +72,7 @@ function buildZenithalMission(
     latitude: pt.latitude,
     elevation: flightHeight,
     height: flightHeight,
+    groundElevation: pt.altitude,
     yaw: 0,
     pitch: -90,
     zoom: 1,
@@ -486,7 +487,7 @@ export function RouteExporter({
     try {
       const missions = buildMissions();
       for (let i = 0; i < missions.length; i++) {
-        const blob = await generateDJIMission(missions[i]);
+        const blob = await generateDJIMission(missions[i], { heightMode: 'aboveGroundLevel' });
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -511,7 +512,7 @@ export function RouteExporter({
       const missions = buildMissions();
       for (let i = 0; i < missions.length; i++) {
         setUploadProgress(`Subiendo ruta ${i + 1} de ${missions.length}...`);
-        await uploadMission(missions[i]);
+        await uploadMission(missions[i], { heightMode: 'aboveGroundLevel' });
       }
       setUploadProgress(null);
       log.info(`Uploaded ${missions.length} missions to FlightHub`);
@@ -953,7 +954,7 @@ export function RouteExporter({
             onChange={(e) => setFlightHeight(Number(e.target.value))}
             style={{ width: '100px' }}
           />
-          <small>Relativa al punto de despegue</small>
+          <small>Altura sobre el nivel del suelo (AGL)</small>
         </div>
 
         {/* Advanced toggle */}
